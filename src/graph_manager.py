@@ -80,7 +80,7 @@ class GraphManager:
             session.run(
                 """CREATE (a:Attempt {
                     id: $id,
-                    description: $description,
+                    agent_output: $agent_output,
                     is_successful: $is_successful,
                     reasoning: $reasoning,
                     embedding: $embedding
@@ -152,9 +152,35 @@ class GraphManager:
             result = session.run("""
                 CALL db.index.vector.queryNodes('attempt_embedding', $top_k, $embedding)
                 YIELD node, score
-                RETURN node.id as id, node.description as description, score
+                RETURN node.id as id, node.agent_output as agent_output,
+                       node.is_successful as is_successful, node.reasoning as reasoning, score
             """, top_k=top_k, embedding=embedding)
             return [dict(r) for r in result]
+
+    def find_contrastive_attempts(self, embedding: list[float], top_k: int = 3) -> dict:
+        """
+        Find similar attempts split by success/failure for contrastive learning.
+
+        Returns: {
+            "positive": [top_k successful attempts],
+            "negative": [top_k failed attempts]
+        }
+        """
+        with self.driver.session() as session:
+            # Get more candidates to filter
+            result = session.run("""
+                CALL db.index.vector.queryNodes('attempt_embedding', $limit, $embedding)
+                YIELD node, score
+                RETURN node.id as id, node.agent_output as agent_output,
+                       node.is_successful as is_successful, node.reasoning as reasoning, score
+            """, limit=top_k * 4, embedding=embedding)
+
+            attempts = [dict(r) for r in result]
+
+            positive = [a for a in attempts if a['is_successful']][:top_k]
+            negative = [a for a in attempts if not a['is_successful']][:top_k]
+
+            return {"positive": positive, "negative": negative}
 
     def find_similar_issues(self, embedding: list[float], top_k: int = 5) -> list[dict]:
         """Find similar issues using vector similarity."""
@@ -165,6 +191,7 @@ class GraphManager:
                 RETURN node.id as id, node.description as description, score
             """, top_k=top_k, embedding=embedding)
             return [dict(r) for r in result]
+ 
 
     # --- Query ---
 
@@ -173,7 +200,8 @@ class GraphManager:
         with self.driver.session() as session:
             result = session.run("""
                 MATCH (a:Attempt)-[:SATISFIES]->(p:Policy {id: $policy_id})
-                RETURN a.id as id, a.description as description
+                RETURN a.id as id, a.agent_output as agent_output,
+                       a.is_successful as is_successful, a.reasoning as reasoning
             """, policy_id=policy_id)
             return [dict(r) for r in result]
 

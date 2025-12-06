@@ -1,6 +1,6 @@
-"""Test the MAJ pipeline with feedback (is_successful + reasoning)."""
+"""Test MAJ pipeline: stateless judge vs memory-assisted judge."""
 
-from judge import judge
+from judge import judge, judge_with_memory
 from graph_manager import GraphManager
 
 gm = GraphManager()
@@ -9,7 +9,7 @@ gm.clear_all()
 
 def store_result(gm, result):
     """Store judge result in Neo4j."""
-    policy_id, is_new = gm.get_or_create_policy(result['policy'])
+    policy_id, _ = gm.get_or_create_policy(result['policy'])
 
     gm.create_attempt(result['attempt'])
     for issue in result['issues']:
@@ -25,108 +25,106 @@ def store_result(gm, result):
         elif rel['type'] == 'RESOLVES':
             gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
 
-    return policy_id
 
-
-def print_result(result):
-    """Print judge result with feedback."""
+def print_result(result, title):
+    """Print judge result."""
     attempt = result['attempt']
     status = "✓ PASSED" if attempt.is_successful else "✗ FAILED"
 
-    print(f"\n{status}")
-    print(f"Attempt: {attempt.description[:70]}...")
-    print(f"Reasoning: {attempt.reasoning[:100]}...")
+    print(f"\n{title}")
+    print(f"{status}")
+    print(f"Reasoning: {attempt.reasoning[:120]}...")
 
-    if result['issues']:
-        print(f"\nIssues ({len(result['issues'])}):")
-        for i, (issue, fix) in enumerate(zip(result['issues'], result['fixes'])):
-            print(f"  {i+1}. {issue.description[:60]}...")
-            print(f"     Fix: {fix.description[:60]}...")
+    if 'memory_used' in result:
+        m = result['memory_used']
+        print(f"Memory: {m['positive_examples']} positive, {m['negative_examples']} negative, {m['similar_issues']} issues")
 
 
-# --- Test 1: Bad email validation (should fail) ---
+# ============================================================
+# PHASE 1: Build memory with stateless judge
+# ============================================================
 print("=" * 60)
-print("TEST 1: Email Validation - Bad Regex")
+print("PHASE 1: Building Memory (stateless judge)")
 print("=" * 60)
 
-task1 = "Write a function to validate email addresses"
-agent_output1 = """
-def validate_email(email):
-    import re
-    pattern = r'^[a-z]+@[a-z]+\.[a-z]+$'
-    return bool(re.match(pattern, email))
-"""
+# Store some examples in memory
+examples = [
+    ("Write a function to validate email addresses",
+     "def validate(e): return '@' in e",
+     "Bad: too simple"),
 
-result1 = judge(task1, agent_output1)
-print_result(result1)
-store_result(gm, result1)
+    ("Write a function to validate email addresses",
+     "import re\ndef validate(e): return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$', e))",
+     "Good: proper regex"),
+
+    ("Write a function to query user from database",
+     "def get_user(name): return db.execute(f\"SELECT * FROM users WHERE name='{name}'\")",
+     "Bad: SQL injection"),
+
+    ("Write a function to query user from database",
+     "def get_user(name): return db.execute('SELECT * FROM users WHERE name=?', (name,))",
+     "Good: parameterized"),
+]
+
+for task, code, label in examples:
+    result = judge(task, code)
+    store_result(gm, result)
+    status = "✓" if result['attempt'].is_successful else "✗"
+    print(f"  {status} {label}")
 
 
-# --- Test 2: Good email validation (should pass) ---
+# ============================================================
+# PHASE 2: Test with memory-assisted judge
+# ============================================================
 print("\n" + "=" * 60)
-print("TEST 2: Email Validation - Good Implementation")
+print("PHASE 2: Testing Memory-Assisted Judge")
 print("=" * 60)
 
-task2 = "Write a function to validate email addresses"
-agent_output2 = """
-import re
-
-def validate_email(email):
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not email or not isinstance(email, str):
+# New attempt - similar to what we've seen before
+new_task = "Write a function to validate email addresses"
+new_code = """
+def check_email(email):
+    if '@' not in email:
         return False
-    return bool(re.match(pattern, email))
+    if '.' not in email:
+        return False
+    return True
 """
 
-result2 = judge(task2, agent_output2)
-print_result(result2)
-store_result(gm, result2)
+print(f"\nTask: {new_task}")
+print(f"Code: Simple @ and . check")
+
+# Judge WITHOUT memory
+print("\n--- Without Memory ---")
+result_no_memory = judge(new_task, new_code)
+print_result(result_no_memory, "Stateless Judge:")
+
+# Judge WITH memory
+print("\n--- With Memory ---")
+result_with_memory = judge_with_memory(new_task, new_code, gm)
+print_result(result_with_memory, "Memory-Assisted Judge:")
 
 
-# --- Test 3: SQL Injection vulnerability (should fail) ---
+# ============================================================
+# PHASE 3: Another test
+# ============================================================
 print("\n" + "=" * 60)
-print("TEST 3: SQL Query - Injection Vulnerability")
+print("PHASE 3: SQL Query Test")
 print("=" * 60)
 
-task3 = "Write a function to get user by username from database"
-agent_output3 = """
-def get_user(username):
-    query = f"SELECT * FROM users WHERE username = '{username}'"
+sql_task = "Write a function to get user by id from database"
+sql_code = """
+def get_user(user_id):
+    query = f"SELECT * FROM users WHERE id = {user_id}"
     return db.execute(query)
 """
 
-result3 = judge(task3, agent_output3)
-print_result(result3)
-store_result(gm, result3)
+print(f"\nTask: {sql_task}")
+print(f"Code: f-string SQL query")
 
-
-# --- Test 4: Safe SQL query (should pass) ---
-print("\n" + "=" * 60)
-print("TEST 4: SQL Query - Safe Implementation")
-print("=" * 60)
-
-task4 = "Write a function to get user by username from database"
-agent_output4 = """
-def get_user(username):
-    query = "SELECT * FROM users WHERE username = ?"
-    return db.execute(query, (username,))
-"""
-
-result4 = judge(task4, agent_output4)
-print_result(result4)
-store_result(gm, result4)
-
-
-# --- Summary ---
-print("\n" + "=" * 60)
-print("SUMMARY")
-print("=" * 60)
-
-results = [result1, result2, result3, result4]
-passed = sum(1 for r in results if r['attempt'].is_successful)
-failed = len(results) - passed
-
-print(f"\nTotal: {len(results)} | Passed: {passed} | Failed: {failed}")
+print("\n--- With Memory ---")
+result_sql = judge_with_memory(sql_task, sql_code, gm)
+print_result(result_sql, "Memory-Assisted Judge:")
 
 
 gm.close()
