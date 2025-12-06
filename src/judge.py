@@ -1,14 +1,14 @@
 """
 MAJ Judge - Evaluates agent outputs and extracts issues/fixes.
 
-Input: task + agent_output
-Output: {attempt, issue_fix_pairs: [{issue, fix}, ...]}
+Input: task (policy) + agent_output
+Output: {policy, attempt, issue_fix_pairs: [{issue, fix}, ...]}
 """
 
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
-from models import Attempt, Issue, Fix, JudgeResult
+from models import Policy, Attempt, Issue, Fix, JudgeResult
 
 load_dotenv()
 
@@ -32,7 +32,7 @@ def judge(task: str, agent_output: str) -> dict:
     """
     Judge an agent's output for a given task.
 
-    Returns dict with attempt, issues, fixes, and relationships.
+    Returns dict with policy, attempt, issues, fixes, and relationships.
     """
     prompt = JUDGE_PROMPT.format(task=task, agent_output=agent_output)
 
@@ -47,11 +47,16 @@ def judge(task: str, agent_output: str) -> dict:
 
     data = response.output_parsed
 
+    # Task becomes the Policy
+    policy = Policy(description=task).with_embedding()
     attempt = Attempt(description=data.attempt).with_embedding()
 
     issues = []
     fixes = []
     relationships = []
+
+    # Attempt SATISFIES Policy
+    relationships.append({"type": "SATISFIES", "from_id": attempt.id, "to_id": policy.id})
 
     for pair in data.issue_fix_pairs:
         issue = Issue(description=pair.issue).with_embedding()
@@ -64,6 +69,7 @@ def judge(task: str, agent_output: str) -> dict:
         relationships.append({"type": "RESOLVES", "from_id": fix.id, "to_id": issue.id})
 
     return {
+        "policy": policy,
         "attempt": attempt,
         "issues": issues,
         "fixes": fixes,

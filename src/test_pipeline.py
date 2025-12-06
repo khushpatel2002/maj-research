@@ -1,4 +1,4 @@
-"""Test the MAJ pipeline with multiple scenarios."""
+"""Test the MAJ pipeline with Policy reuse."""
 
 from judge import judge
 from graph_manager import GraphManager
@@ -7,9 +7,34 @@ from models import get_embedding
 gm = GraphManager()
 gm.clear_all()
 
-# --- Test 1: Email validation (buggy regex) ---
+
+def store_result(gm, result):
+    """Store judge result in Neo4j. Reuses existing Policy if similar."""
+    # Get or create policy (reuse if similar exists)
+    policy_id, is_new = gm.get_or_create_policy(result['policy'])
+    print(f"  Policy: {'NEW' if is_new else 'REUSED'} (id: {policy_id[:8]}...)")
+
+    gm.create_attempt(result['attempt'])
+    for issue in result['issues']:
+        gm.create_issue(issue)
+    for fix in result['fixes']:
+        gm.create_fix(fix)
+
+    for rel in result['relationships']:
+        if rel['type'] == 'SATISFIES':
+            # Use the actual policy_id (might be existing one)
+            gm.link_attempt_satisfies_policy(rel['from_id'], policy_id)
+        elif rel['type'] == 'CAUSES':
+            gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
+        elif rel['type'] == 'RESOLVES':
+            gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+
+    return policy_id
+
+
+# --- Test 1: Email validation (first attempt) ---
 print("=" * 50)
-print("TEST 1: Email Validation")
+print("TEST 1: Email Validation - Attempt 1")
 print("=" * 50)
 
 task1 = "Write a function to validate email addresses"
@@ -21,63 +46,31 @@ def validate_email(email):
 """
 
 result1 = judge(task1, agent_output1)
-print(f"\nAttempt: {result1['attempt'].description[:100]}...")
-print(f"\nIssue-Fix Pairs:")
-for i, (issue, fix) in enumerate(zip(result1['issues'], result1['fixes'])):
-    print(f"  {i+1}. Issue: {issue.description[:80]}...")
-    print(f"     Fix: {fix.description[:80]}...")
-
-# Store
-gm.create_attempt(result1['attempt'])
-for issue in result1['issues']:
-    gm.create_issue(issue)
-for fix in result1['fixes']:
-    gm.create_fix(fix)
-for rel in result1['relationships']:
-    if rel['type'] == 'CAUSES':
-        gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
-    elif rel['type'] == 'RESOLVES':
-        gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+print(f"\nTask: {task1}")
+print(f"Attempt: {result1['attempt'].description[:60]}...")
+policy_id_1 = store_result(gm, result1)
 
 
-# --- Test 2: Sorting function (inefficient) ---
+# --- Test 2: Email validation (second attempt - should reuse policy) ---
 print("\n" + "=" * 50)
-print("TEST 2: Sorting Function")
+print("TEST 2: Email Validation - Attempt 2 (same task)")
 print("=" * 50)
 
-task2 = "Write an efficient sorting function for large arrays"
+task2 = "Validate email addresses"  # Similar task, slightly different wording
 agent_output2 = """
-def sort_array(arr):
-    for i in range(len(arr)):
-        for j in range(len(arr) - 1):
-            if arr[j] > arr[j + 1]:
-                arr[j], arr[j + 1] = arr[j + 1], arr[j]
-    return arr
+def check_email(email):
+    return '@' in email and '.' in email
 """
 
 result2 = judge(task2, agent_output2)
-print(f"\nAttempt: {result2['attempt'].description[:100]}...")
-print(f"\nIssue-Fix Pairs:")
-for i, (issue, fix) in enumerate(zip(result2['issues'], result2['fixes'])):
-    print(f"  {i+1}. Issue: {issue.description[:80]}...")
-    print(f"     Fix: {fix.description[:80]}...")
-
-# Store
-gm.create_attempt(result2['attempt'])
-for issue in result2['issues']:
-    gm.create_issue(issue)
-for fix in result2['fixes']:
-    gm.create_fix(fix)
-for rel in result2['relationships']:
-    if rel['type'] == 'CAUSES':
-        gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
-    elif rel['type'] == 'RESOLVES':
-        gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+print(f"\nTask: {task2}")
+print(f"Attempt: {result2['attempt'].description[:60]}...")
+policy_id_2 = store_result(gm, result2)
 
 
-# --- Test 3: SQL query (injection vulnerability) ---
+# --- Test 3: Different task (should create new policy) ---
 print("\n" + "=" * 50)
-print("TEST 3: SQL Query")
+print("TEST 3: SQL Query (different task)")
 print("=" * 50)
 
 task3 = "Write a function to get user by username from database"
@@ -88,42 +81,31 @@ def get_user(username):
 """
 
 result3 = judge(task3, agent_output3)
-print(f"\nAttempt: {result3['attempt'].description[:100]}...")
-print(f"\nIssue-Fix Pairs:")
-for i, (issue, fix) in enumerate(zip(result3['issues'], result3['fixes'])):
-    print(f"  {i+1}. Issue: {issue.description[:80]}...")
-    print(f"     Fix: {fix.description[:80]}...")
-
-# Store
-gm.create_attempt(result3['attempt'])
-for issue in result3['issues']:
-    gm.create_issue(issue)
-for fix in result3['fixes']:
-    gm.create_fix(fix)
-for rel in result3['relationships']:
-    if rel['type'] == 'CAUSES':
-        gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
-    elif rel['type'] == 'RESOLVES':
-        gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+print(f"\nTask: {task3}")
+print(f"Attempt: {result3['attempt'].description[:60]}...")
+policy_id_3 = store_result(gm, result3)
 
 
-# --- Test Vector Search ---
+# --- Verify Policy Reuse ---
 print("\n" + "=" * 50)
-print("VECTOR SEARCH TESTS")
+print("POLICY REUSE CHECK")
 print("=" * 50)
 
-queries = [
-    "security vulnerability",
-    "performance problem",
-    "input validation",
-]
+print(f"\nTest 1 & 2 same policy? {policy_id_1 == policy_id_2}")
+print(f"Test 3 different policy? {policy_id_1 != policy_id_3}")
 
-for q in queries:
-    print(f"\nQuery: '{q}'")
-    embedding = get_embedding(q)
-    results = gm.find_similar_issues(embedding, top_k=3)
-    for r in results:
-        print(f"  [{r['score']:.3f}] {r['description'][:70]}...")
+
+# --- Show all attempts for email validation policy ---
+print("\n" + "=" * 50)
+print("ALL ATTEMPTS FOR EMAIL POLICY")
+print("=" * 50)
+
+attempts = gm.get_attempts_for_policy(policy_id_1)
+print(f"\nPolicy ID: {policy_id_1[:8]}...")
+print(f"Attempts ({len(attempts)}):")
+for a in attempts:
+    print(f"  - {a['description'][:60]}...")
+
 
 gm.close()
 print("\n" + "=" * 50)

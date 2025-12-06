@@ -2,6 +2,7 @@
 MAJ (Memory Assisted Judge) Node Models
 
 Core nodes and relationships:
+- Attempt → SATISFIES → Policy
 - Attempt → CAUSES → Issue
 - Fix → RESOLVES → Issue
 """
@@ -25,6 +26,24 @@ def get_embedding(text: str) -> list[float]:
         input=text
     )
     return response.data[0].embedding
+
+
+class Policy(BaseModel):
+    """The task/requirement that attempts try to satisfy."""
+    description: str
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    embedding: Optional[list[float]] = None
+
+    def with_embedding(self) -> "Policy":
+        self.embedding = get_embedding(self.description)
+        return self
+
+    def to_neo4j_props(self) -> dict:
+        return {
+            "id": self.id,
+            "description": self.description,
+            "embedding": self.embedding
+        }
 
 
 class Attempt(BaseModel):

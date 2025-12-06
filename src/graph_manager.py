@@ -2,6 +2,7 @@
 Neo4j Graph Manager for MAJ
 
 Handles CRUD operations and vector similarity search for:
+- Attempt → SATISFIES → Policy
 - Attempt → CAUSES → Issue
 - Fix → RESOLVES → Issue
 """
@@ -9,19 +10,21 @@ Handles CRUD operations and vector similarity search for:
 import os
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
-from models import Attempt, Issue, Fix
+from models import Policy, Attempt, Issue, Fix
 
 load_dotenv()
 
-EMBEDDING_DIM = 1536  # text-embedding-3-small
+EMBEDDING_DIM = 1536
+DEFAULT_POLICY_THRESHOLD = 0.9
 
 
 class GraphManager:
-    def __init__(self):
+    def __init__(self, policy_threshold: float = None):
         self.driver = GraphDatabase.driver(
             os.getenv("NEO4J_URI"),
             auth=(os.getenv("NEO4J_USER"), os.getenv("NEO4J_PASSWORD"))
         )
+        self.policy_threshold = policy_threshold or float(os.getenv("POLICY_THRESHOLD", DEFAULT_POLICY_THRESHOLD))
         self._ensure_vector_indexes()
 
     def close(self):
@@ -30,8 +33,7 @@ class GraphManager:
     def _ensure_vector_indexes(self):
         """Create vector indexes for similarity search."""
         with self.driver.session() as session:
-            # Check and create indexes for each node type
-            for label in ["Attempt", "Issue", "Fix"]:
+            for label in ["Policy", "Attempt", "Issue", "Fix"]:
                 session.run(f"""
                     CREATE VECTOR INDEX {label.lower()}_embedding IF NOT EXISTS
                     FOR (n:{label})
@@ -43,6 +45,35 @@ class GraphManager:
                 """)
 
     # --- Create Nodes ---
+
+    def get_or_create_policy(self, policy: Policy, threshold: float = None) -> tuple[str, bool]:
+        """
+        Get existing policy if similar one exists, otherwise create new.
+
+        Returns: (policy_id, is_new)
+        """
+        threshold = threshold or self.policy_threshold
+
+        # Check for similar existing policy
+        similar = self.find_similar_policies(policy.embedding, top_k=1)
+        if similar and similar[0]['score'] >= threshold:
+            return similar[0]['id'], False
+
+        # Create new policy
+        with self.driver.session() as session:
+            session.run(
+                "CREATE (p:Policy {id: $id, description: $description, embedding: $embedding})",
+                **policy.to_neo4j_props()
+            )
+        return policy.id, True
+
+    def create_policy(self, policy: Policy) -> str:
+        with self.driver.session() as session:
+            session.run(
+                "CREATE (p:Policy {id: $id, description: $description, embedding: $embedding})",
+                **policy.to_neo4j_props()
+            )
+        return policy.id
 
     def create_attempt(self, attempt: Attempt) -> str:
         with self.driver.session() as session:
@@ -70,6 +101,15 @@ class GraphManager:
 
     # --- Create Relationships ---
 
+    def link_attempt_satisfies_policy(self, attempt_id: str, policy_id: str):
+        """Attempt → SATISFIES → Policy"""
+        with self.driver.session() as session:
+            session.run("""
+                MATCH (a:Attempt {id: $attempt_id})
+                MATCH (p:Policy {id: $policy_id})
+                CREATE (a)-[:SATISFIES]->(p)
+            """, attempt_id=attempt_id, policy_id=policy_id)
+
     def link_attempt_causes_issue(self, attempt_id: str, issue_id: str):
         """Attempt → CAUSES → Issue"""
         with self.driver.session() as session:
@@ -89,6 +129,16 @@ class GraphManager:
             """, fix_id=fix_id, issue_id=issue_id)
 
     # --- Vector Similarity Search ---
+
+    def find_similar_policies(self, embedding: list[float], top_k: int = 5) -> list[dict]:
+        """Find similar policies using vector similarity."""
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.vector.queryNodes('policy_embedding', $top_k, $embedding)
+                YIELD node, score
+                RETURN node.id as id, node.description as description, score
+            """, top_k=top_k, embedding=embedding)
+            return [dict(r) for r in result]
 
     def find_similar_attempts(self, embedding: list[float], top_k: int = 5) -> list[dict]:
         """Find similar attempts using vector similarity."""
@@ -111,6 +161,15 @@ class GraphManager:
             return [dict(r) for r in result]
 
     # --- Query ---
+
+    def get_attempts_for_policy(self, policy_id: str) -> list[dict]:
+        """Get all attempts that satisfy a policy."""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (a:Attempt)-[:SATISFIES]->(p:Policy {id: $policy_id})
+                RETURN a.id as id, a.description as description
+            """, policy_id=policy_id)
+            return [dict(r) for r in result]
 
     def get_issues_for_attempt(self, attempt_id: str) -> list[dict]:
         """Get all issues caused by an attempt."""
