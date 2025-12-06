@@ -2,7 +2,7 @@
 MAJ Judge - Evaluates agent outputs and extracts issues/fixes.
 
 Input: task (policy) + agent_output
-Output: {policy, attempt, issue_fix_pairs: [{issue, fix}, ...]}
+Output: {policy, attempt (with feedback), issue_fix_pairs}
 """
 
 import os
@@ -23,16 +23,18 @@ AGENT OUTPUT:
 
 Evaluate and return:
 1. attempt: summary of the approach taken
-2. issue_fix_pairs: list of {{issue, fix}} pairs
+2. is_successful: true if the output correctly solves the task, false otherwise
+3. reasoning: explanation of why the attempt succeeded or failed
+4. issue_fix_pairs: list of {{issue, fix}} pairs (empty if successful)
 
-If no issues, return empty issue_fix_pairs."""
+Be strict but fair in your evaluation."""
 
 
 def judge(task: str, agent_output: str) -> dict:
     """
     Judge an agent's output for a given task.
 
-    Returns dict with policy, attempt, issues, fixes, and relationships.
+    Returns dict with policy, attempt (with feedback), issues, fixes, and relationships.
     """
     prompt = JUDGE_PROMPT.format(task=task, agent_output=agent_output)
 
@@ -49,7 +51,13 @@ def judge(task: str, agent_output: str) -> dict:
 
     # Task becomes the Policy
     policy = Policy(description=task).with_embedding()
-    attempt = Attempt(description=data.attempt).with_embedding()
+
+    # Attempt with feedback
+    attempt = Attempt(
+        description=data.attempt,
+        is_successful=data.is_successful,
+        reasoning=data.reasoning
+    ).with_embedding()
 
     issues = []
     fixes = []

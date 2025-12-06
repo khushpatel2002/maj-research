@@ -49,6 +49,8 @@ class Policy(BaseModel):
 class Attempt(BaseModel):
     """An approach/attempt to solve a task."""
     description: str
+    is_successful: bool = False
+    reasoning: str = ""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     embedding: Optional[list[float]] = None
 
@@ -60,6 +62,8 @@ class Attempt(BaseModel):
         return {
             "id": self.id,
             "description": self.description,
+            "is_successful": self.is_successful,
+            "reasoning": self.reasoning,
             "embedding": self.embedding
         }
 
@@ -111,4 +115,6 @@ class IssueFix(BaseModel):
 class JudgeResult(BaseModel):
     """Schema for LLM judge output."""
     attempt: str
+    is_successful: bool
+    reasoning: str
     issue_fix_pairs: list[IssueFix]

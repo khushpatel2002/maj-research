@@ -78,7 +78,13 @@ class GraphManager:
     def create_attempt(self, attempt: Attempt) -> str:
         with self.driver.session() as session:
             session.run(
-                "CREATE (a:Attempt {id: $id, description: $description, embedding: $embedding})",
+                """CREATE (a:Attempt {
+                    id: $id,
+                    description: $description,
+                    is_successful: $is_successful,
+                    reasoning: $reasoning,
+                    embedding: $embedding
+                })""",
                 **attempt.to_neo4j_props()
             )
         return attempt.id

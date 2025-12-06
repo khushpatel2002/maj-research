@@ -1,18 +1,15 @@
-"""Test the MAJ pipeline with Policy reuse."""
+"""Test the MAJ pipeline with feedback (is_successful + reasoning)."""
 
 from judge import judge
 from graph_manager import GraphManager
-from models import get_embedding
 
 gm = GraphManager()
 gm.clear_all()
 
 
 def store_result(gm, result):
-    """Store judge result in Neo4j. Reuses existing Policy if similar."""
-    # Get or create policy (reuse if similar exists)
+    """Store judge result in Neo4j."""
     policy_id, is_new = gm.get_or_create_policy(result['policy'])
-    print(f"  Policy: {'NEW' if is_new else 'REUSED'} (id: {policy_id[:8]}...)")
 
     gm.create_attempt(result['attempt'])
     for issue in result['issues']:
@@ -22,7 +19,6 @@ def store_result(gm, result):
 
     for rel in result['relationships']:
         if rel['type'] == 'SATISFIES':
-            # Use the actual policy_id (might be existing one)
             gm.link_attempt_satisfies_policy(rel['from_id'], policy_id)
         elif rel['type'] == 'CAUSES':
             gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
@@ -32,10 +28,26 @@ def store_result(gm, result):
     return policy_id
 
 
-# --- Test 1: Email validation (first attempt) ---
-print("=" * 50)
-print("TEST 1: Email Validation - Attempt 1")
-print("=" * 50)
+def print_result(result):
+    """Print judge result with feedback."""
+    attempt = result['attempt']
+    status = "✓ PASSED" if attempt.is_successful else "✗ FAILED"
+
+    print(f"\n{status}")
+    print(f"Attempt: {attempt.description[:70]}...")
+    print(f"Reasoning: {attempt.reasoning[:100]}...")
+
+    if result['issues']:
+        print(f"\nIssues ({len(result['issues'])}):")
+        for i, (issue, fix) in enumerate(zip(result['issues'], result['fixes'])):
+            print(f"  {i+1}. {issue.description[:60]}...")
+            print(f"     Fix: {fix.description[:60]}...")
+
+
+# --- Test 1: Bad email validation (should fail) ---
+print("=" * 60)
+print("TEST 1: Email Validation - Bad Regex")
+print("=" * 60)
 
 task1 = "Write a function to validate email addresses"
 agent_output1 = """
@@ -46,32 +58,35 @@ def validate_email(email):
 """
 
 result1 = judge(task1, agent_output1)
-print(f"\nTask: {task1}")
-print(f"Attempt: {result1['attempt'].description[:60]}...")
-policy_id_1 = store_result(gm, result1)
+print_result(result1)
+store_result(gm, result1)
 
 
-# --- Test 2: Email validation (second attempt - should reuse policy) ---
-print("\n" + "=" * 50)
-print("TEST 2: Email Validation - Attempt 2 (same task)")
-print("=" * 50)
+# --- Test 2: Good email validation (should pass) ---
+print("\n" + "=" * 60)
+print("TEST 2: Email Validation - Good Implementation")
+print("=" * 60)
 
-task2 = "Validate email addresses"  # Similar task, slightly different wording
+task2 = "Write a function to validate email addresses"
 agent_output2 = """
-def check_email(email):
-    return '@' in email and '.' in email
+import re
+
+def validate_email(email):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not email or not isinstance(email, str):
+        return False
+    return bool(re.match(pattern, email))
 """
 
 result2 = judge(task2, agent_output2)
-print(f"\nTask: {task2}")
-print(f"Attempt: {result2['attempt'].description[:60]}...")
-policy_id_2 = store_result(gm, result2)
+print_result(result2)
+store_result(gm, result2)
 
 
-# --- Test 3: Different task (should create new policy) ---
-print("\n" + "=" * 50)
-print("TEST 3: SQL Query (different task)")
-print("=" * 50)
+# --- Test 3: SQL Injection vulnerability (should fail) ---
+print("\n" + "=" * 60)
+print("TEST 3: SQL Query - Injection Vulnerability")
+print("=" * 60)
 
 task3 = "Write a function to get user by username from database"
 agent_output3 = """
@@ -81,33 +96,40 @@ def get_user(username):
 """
 
 result3 = judge(task3, agent_output3)
-print(f"\nTask: {task3}")
-print(f"Attempt: {result3['attempt'].description[:60]}...")
-policy_id_3 = store_result(gm, result3)
+print_result(result3)
+store_result(gm, result3)
 
 
-# --- Verify Policy Reuse ---
-print("\n" + "=" * 50)
-print("POLICY REUSE CHECK")
-print("=" * 50)
+# --- Test 4: Safe SQL query (should pass) ---
+print("\n" + "=" * 60)
+print("TEST 4: SQL Query - Safe Implementation")
+print("=" * 60)
 
-print(f"\nTest 1 & 2 same policy? {policy_id_1 == policy_id_2}")
-print(f"Test 3 different policy? {policy_id_1 != policy_id_3}")
+task4 = "Write a function to get user by username from database"
+agent_output4 = """
+def get_user(username):
+    query = "SELECT * FROM users WHERE username = ?"
+    return db.execute(query, (username,))
+"""
+
+result4 = judge(task4, agent_output4)
+print_result(result4)
+store_result(gm, result4)
 
 
-# --- Show all attempts for email validation policy ---
-print("\n" + "=" * 50)
-print("ALL ATTEMPTS FOR EMAIL POLICY")
-print("=" * 50)
+# --- Summary ---
+print("\n" + "=" * 60)
+print("SUMMARY")
+print("=" * 60)
 
-attempts = gm.get_attempts_for_policy(policy_id_1)
-print(f"\nPolicy ID: {policy_id_1[:8]}...")
-print(f"Attempts ({len(attempts)}):")
-for a in attempts:
-    print(f"  - {a['description'][:60]}...")
+results = [result1, result2, result3, result4]
+passed = sum(1 for r in results if r['attempt'].is_successful)
+failed = len(results) - passed
+
+print(f"\nTotal: {len(results)} | Passed: {passed} | Failed: {failed}")
 
 
 gm.close()
-print("\n" + "=" * 50)
+print("\n" + "=" * 60)
 print("DONE!")
-print("=" * 50)
+print("=" * 60)
