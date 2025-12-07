@@ -10,86 +10,63 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 from models import Policy, Attempt, Issue, Fix, JudgeResult, get_embedding
+from prompts import build_judge_prompt, build_judge_with_memory_prompt, DEFAULT_GOAL
 
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# --- Prompts ---
-
-JUDGE_PROMPT = """You are an AI Judge evaluating an agent's output for a given task.
-
-TASK: {task}
-
-AGENT OUTPUT:
-{agent_output}
-
-Evaluate and return:
-1. is_successful: true if the output correctly solves the task, false otherwise
-2. reasoning: explanation of why the attempt succeeded or failed
-3. issue_fix_pairs: list of {{issue, fix}} pairs (empty if successful)
-
-Be strict but fair in your evaluation."""
-
-
-JUDGE_WITH_MEMORY_PROMPT = """You are an AI Judge evaluating an agent's output for a given task.
-You have access to memory of similar past attempts - learn from them.
-
-TASK: {task}
-
-AGENT OUTPUT:
-{agent_output}
-
-MEMORY CONTEXT:
-{memory_context}
-
-Based on your memory of similar past attempts:
-- Learn from successful approaches
-- Avoid issues seen in failed attempts
-- Be consistent with previous judgments
-
-Evaluate and return:
-1. is_successful: true if the output correctly solves the task, false otherwise
-2. reasoning: explanation of why the attempt succeeded or failed (reference past experiences if relevant)
-3. issue_fix_pairs: list of {{issue, fix}} pairs (empty if successful)
-
-Be strict but fair in your evaluation."""
 
 
 def _format_memory_context(contrastive: dict, similar_issues: list) -> str:
     """Format retrieved memory into prompt context."""
     parts = []
 
-    if contrastive['positive']:
-        parts.append("SUCCESSFUL APPROACHES (learn from these):")
-        for i, a in enumerate(contrastive['positive'], 1):
-            parts.append(f"  {i}. Code: {a['agent_output'][:150]}...")
-            parts.append(f"     Why it worked: {a['reasoning'][:100]}...")
+    # Filter by similarity threshold - only high-confidence matches
+    # Positive examples: lower threshold (0.80) - good to learn patterns
+    # Negative examples: higher threshold (0.90) - must be very similar to apply
+    positive = [a for a in contrastive['positive'] if a.get('score', 0) >= 0.80]
+    negative = [a for a in contrastive['negative'] if a.get('score', 0) >= 0.90]
+    issues = [i for i in similar_issues if i.get('score', 0) >= 0.85]
 
-    if contrastive['negative']:
-        parts.append("\nFAILED APPROACHES (avoid these issues):")
-        for i, a in enumerate(contrastive['negative'], 1):
-            parts.append(f"  {i}. Code: {a['agent_output'][:150]}...")
-            parts.append(f"     Why it failed: {a['reasoning'][:100]}...")
+    if positive:
+        parts.append("SUCCESSFUL APPROACHES (similar code that passed):")
+        for i, a in enumerate(positive, 1):
+            score = a.get('score', 0)
+            parts.append(f"  {i}. [similarity: {score:.0%}] Code: {a['agent_output'][:200]}...")
+            parts.append(f"     Why it worked: {a['reasoning']}")
 
-    if similar_issues:
-        parts.append("\nKNOWN ISSUES (watch out for):")
-        for i, issue in enumerate(similar_issues, 1):
-            parts.append(f"  {i}. {issue['description'][:100]}...")
+    if negative:
+        parts.append("\nFAILED APPROACHES (similar code that failed - check if same issue applies):")
+        for i, a in enumerate(negative, 1):
+            score = a.get('score', 0)
+            parts.append(f"  {i}. [similarity: {score:.0%}] Code: {a['agent_output'][:200]}...")
+            parts.append(f"     Why it failed: {a['reasoning']}")
 
-    return "\n".join(parts) if parts else "No relevant past experiences found."
+    if issues:
+        parts.append("\nKNOWN ISSUES (from similar code):")
+        for i, issue in enumerate(issues, 1):
+            score = issue.get('score', 0)
+            parts.append(f"  {i}. [similarity: {score:.0%}] {issue['description']}")
+
+    return "\n".join(parts) if parts else "No highly similar past experiences found."
 
 
-def judge(task: str, agent_output: str) -> dict:
+def judge(task: str, agent_output: str, goal: str = None, model: str = "gpt-4o-mini") -> dict:
     """
     Judge an agent's output for a given task (stateless, no memory).
+
+    Args:
+        task: The task description
+        agent_output: The agent's code/response
+        goal: What to evaluate for (defaults to DEFAULT_GOAL)
+        model: OpenAI model to use (default: gpt-4o-mini)
     """
-    prompt = JUDGE_PROMPT.format(task=task, agent_output=agent_output)
+    goal = goal or DEFAULT_GOAL
+    prompt = build_judge_prompt(task=task, agent_output=agent_output, goal=goal)
 
     response = client.responses.parse(
-        model="gpt-4o-mini",
+        model=model,
         input=[
-            {"role": "system", "content": "You are an expert AI Judge."},
             {"role": "user", "content": prompt}
         ],
         text_format=JudgeResult,
@@ -98,33 +75,40 @@ def judge(task: str, agent_output: str) -> dict:
     return _build_result(task, agent_output, response.output_parsed)
 
 
-def judge_with_memory(task: str, agent_output: str, graph_manager) -> dict:
+def judge_with_memory(task: str, agent_output: str, graph_manager, goal: str = None, model: str = "gpt-4o-mini") -> dict:
     """
     Judge an agent's output using memory of past experiences.
 
-    Retrieves similar past attempts (positive and negative) and issues
-    to provide context for more informed evaluation.
+    Args:
+        task: The task description
+        agent_output: The agent's code/response
+        graph_manager: GraphManager instance for memory retrieval
+        goal: What to evaluate for (defaults to DEFAULT_GOAL)
+        model: OpenAI model to use (default: gpt-4o-mini)
     """
-    # Get embedding for the task to find similar experiences
-    task_embedding = get_embedding(task)
+    goal = goal or DEFAULT_GOAL
 
-    # Retrieve from memory
-    contrastive = graph_manager.find_contrastive_attempts(task_embedding, top_k=3)
-    similar_issues = graph_manager.find_similar_issues(task_embedding, top_k=5)
+    # Get embedding for the CODE to find similar implementations
+    # (not task - task similarity conflates good/bad implementations of same task)
+    code_embedding = get_embedding(agent_output)
+
+    # Retrieve from memory based on code similarity
+    contrastive = graph_manager.find_contrastive_attempts(code_embedding, top_k=3)
+    similar_issues = graph_manager.find_similar_issues(code_embedding, top_k=5)
 
     # Format memory context
     memory_context = _format_memory_context(contrastive, similar_issues)
 
-    prompt = JUDGE_WITH_MEMORY_PROMPT.format(
+    prompt = build_judge_with_memory_prompt(
         task=task,
         agent_output=agent_output,
+        goal=goal,
         memory_context=memory_context
     )
 
     response = client.responses.parse(
-        model="gpt-4o-mini",
+        model=model,
         input=[
-            {"role": "system", "content": "You are an expert AI Judge with memory of past evaluations."},
             {"role": "user", "content": prompt}
         ],
         text_format=JudgeResult,

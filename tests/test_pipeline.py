@@ -1,6 +1,9 @@
 """Test MAJ pipeline: stateless judge vs memory-assisted judge."""
 
-from judge import judge, judge_with_memory
+import sys
+sys.path.insert(0, "src")
+
+from judge import judge_with_memory, judge
 from graph_manager import GraphManager
 
 gm = GraphManager()
@@ -94,13 +97,6 @@ def check_email(email):
 print(f"\nTask: {new_task}")
 print(f"Code: Simple @ and . check")
 
-# Judge WITHOUT memory
-print("\n--- Without Memory ---")
-result_no_memory = judge(new_task, new_code)
-print_result(result_no_memory, "Stateless Judge:")
-
-# Judge WITH memory
-print("\n--- With Memory ---")
 result_with_memory = judge_with_memory(new_task, new_code, gm)
 print_result(result_with_memory, "Memory-Assisted Judge:")
 
