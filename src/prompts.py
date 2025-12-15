@@ -10,8 +10,8 @@ Structure:
 """
 
 # --- FIXED: ROLE ---
-ROLE = """You are an expert AI Judge who evaluates code solutions.
-You have deep knowledge of software engineering best practices, security vulnerabilities, and code quality."""
+ROLE = """You are an expert AI Judge who evaluates solutions.
+You have deep knowledge of software engineering best practices, security vulnerabilities, and quality."""
 
 # --- PLACEHOLDER: GOAL ---
 # This should be provided per task type
@@ -31,7 +31,7 @@ OUTPUT_SCHEMA = """Return your evaluation:
 3. issue_fix_pairs: list of {{issue, fix}} pairs (empty if successful)"""
 
 # --- MEMORY CONTEXT (added when using memory) ---
-MEMORY_CONTEXT = """MEMORY CONTEXT (similar code patterns from past evaluations):
+MEMORY_CONTEXT = """MEMORY CONTEXT (similar patterns from past evaluations):
 {memory_context}
 
 How to use this context:
@@ -71,6 +71,56 @@ GOAL: {goal}
 # --- DEFAULT GOALS ---
 # These can be customized per task type
 
-DEFAULT_GOAL = """Evaluate if the code correctly solves the CORE requirement of the task.
+DEFAULT_GOAL = """Evaluate if the solution correctly solves the CORE requirement of the task.
 Focus on functionality, not production-readiness (error handling, logging, etc.)."""
+
+
+# --- SEMANTIC CLASSIFICATION ---
+
+CLASSIFICATION_ROLE = """You are an expert at categorizing software issues into semantic groups.
+Focus on ROOT CAUSES, not symptoms."""
+
+CLASSIFICATION_INSTRUCTION = """ISSUE TO CLASSIFY:
+{issue_description}
+
+EXISTING SEMANTIC CATEGORIES:
+{existing_categories}
+
+Classify this issue:
+1. If it matches an existing category, return that category's exact name
+2. If no match, propose a NEW category name and description
+
+Examples of good category names (root causes):
+- "SQL Injection Vulnerability" (not "query error")
+- "Missing Input Validation" (not "crash on bad input")
+- "Race Condition" (not "intermittent failure")
+- "Weak Cryptography" (not "security issue")
+- "Path Traversal Vulnerability" (not "file access error")
+"""
+
+CLASSIFICATION_OUTPUT = """Return:
+1. category_name: Name of the semantic category (existing or new)
+2. category_description: Description of this category (especially if new)
+3. is_new_category: true if proposing a new category, false if using existing
+4. reasoning: Why this issue belongs to this category"""
+
+
+def build_classification_prompt(issue_description: str, existing_categories: list[dict]) -> str:
+    """Build prompt for classifying an issue into a semantic category."""
+    if existing_categories:
+        categories_str = "\n".join([
+            f"- {cat['name']}: {cat['description']}"
+            for cat in existing_categories
+        ])
+    else:
+        categories_str = "(No existing categories yet - propose a new one)"
+
+    return f"""{CLASSIFICATION_ROLE}
+
+{CLASSIFICATION_INSTRUCTION.format(
+    issue_description=issue_description,
+    existing_categories=categories_str
+)}
+
+{CLASSIFICATION_OUTPUT}"""
    

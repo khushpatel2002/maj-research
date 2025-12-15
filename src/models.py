@@ -104,6 +104,26 @@ class Fix(BaseModel):
         }
 
 
+class Semantic(BaseModel):
+    """An abstract semantic category that groups similar issues."""
+    name: str           # e.g., "SQL Injection Vulnerability"
+    description: str    # Detailed explanation of this pattern
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    embedding: Optional[list[float]] = None
+
+    def with_embedding(self) -> "Semantic":
+        self.embedding = get_embedding(f"{self.name}: {self.description}")
+        return self
+
+    def to_neo4j_props(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "embedding": self.embedding
+        }
+
+
 # --- LLM Extraction Schema ---
 
 class IssueFix(BaseModel):
@@ -117,3 +137,11 @@ class JudgeResult(BaseModel):
     is_successful: bool
     reasoning: str
     issue_fix_pairs: list[IssueFix]
+
+
+class SemanticClassification(BaseModel):
+    """LLM output for classifying an issue into a semantic category."""
+    category_name: str        # Name of semantic category
+    category_description: str # Description (used if new category)
+    is_new_category: bool     # True if no existing match found
+    reasoning: str            # Why this classification

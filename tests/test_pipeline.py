@@ -20,6 +20,13 @@ def store_result(gm, result):
     for fix in result['fixes']:
         gm.create_fix(fix)
 
+    # Store semantics if present (only new ones)
+    semantic_rels = result.get('semantic_relationships', [])
+    for i, semantic in enumerate(result.get('semantics', [])):
+        # Only create if it's a new semantic (check is_new flag)
+        if i < len(semantic_rels) and semantic_rels[i].get('is_new', True):
+            gm.get_or_create_semantic(semantic)
+
     for rel in result['relationships']:
         if rel['type'] == 'SATISFIES':
             gm.link_attempt_satisfies_policy(rel['from_id'], policy_id)
@@ -27,6 +34,11 @@ def store_result(gm, result):
             gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
         elif rel['type'] == 'RESOLVES':
             gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+
+    # Store semantic relationships if present
+    for rel in result.get('semantic_relationships', []):
+        if rel['type'] == 'ABSTRACTS_TO':
+            gm.link_issue_abstracts_to_semantic(rel['from_id'], rel['to_id'])
 
 
 def print_result(result, title):
@@ -41,6 +53,9 @@ def print_result(result, title):
     if 'memory_used' in result:
         m = result['memory_used']
         print(f"Memory: {m['positive_examples']} positive, {m['negative_examples']} negative, {m['similar_issues']} issues")
+
+    if 'semantics' in result and result['semantics']:
+        print(f"Semantics: {[s.name for s in result['semantics']]}")
 
 
 # ============================================================

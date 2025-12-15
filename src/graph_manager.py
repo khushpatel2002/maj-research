@@ -10,7 +10,7 @@ Handles CRUD operations and vector similarity search for:
 import os
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
-from models import Policy, Attempt, Issue, Fix
+from models import Policy, Attempt, Issue, Fix, Semantic
 
 load_dotenv()
 
@@ -33,7 +33,7 @@ class GraphManager:
     def _ensure_vector_indexes(self):
         """Create vector indexes for similarity search."""
         with self.driver.session() as session:
-            for label in ["Policy", "Attempt", "Issue", "Fix"]:
+            for label in ["Policy", "Attempt", "Issue", "Fix", "Semantic"]:
                 session.run(f"""
                     CREATE VECTOR INDEX {label.lower()}_embedding IF NOT EXISTS
                     FOR (n:{label})
@@ -227,3 +227,126 @@ class GraphManager:
         """Clear all nodes and relationships (for testing)."""
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
+
+    # --- Semantic Node Operations ---
+
+    def create_semantic(self, semantic: Semantic) -> str:
+        """Create a Semantic node."""
+        with self.driver.session() as session:
+            session.run(
+                """CREATE (s:Semantic {
+                    id: $id,
+                    name: $name,
+                    description: $description,
+                    embedding: $embedding
+                })""",
+                **semantic.to_neo4j_props()
+            )
+        return semantic.id
+
+    def link_issue_abstracts_to_semantic(self, issue_id: str, semantic_id: str):
+        """Issue → ABSTRACTS_TO → Semantic"""
+        with self.driver.session() as session:
+            session.run("""
+                MATCH (i:Issue {id: $issue_id})
+                MATCH (s:Semantic {id: $semantic_id})
+                CREATE (i)-[:ABSTRACTS_TO]->(s)
+            """, issue_id=issue_id, semantic_id=semantic_id)
+
+    def find_similar_semantics(self, embedding: list[float], top_k: int = 5) -> list[dict]:
+        """Find similar semantic categories using vector similarity."""
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.vector.queryNodes('semantic_embedding', $top_k, $embedding)
+                YIELD node, score
+                RETURN node.id as id, node.name as name,
+                       node.description as description, score
+            """, top_k=top_k, embedding=embedding)
+            return [dict(r) for r in result]
+
+    def get_all_semantics(self) -> list[dict]:
+        """Get all semantic categories."""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (s:Semantic)
+                RETURN s.id as id, s.name as name, s.description as description
+            """)
+            return [dict(r) for r in result]
+
+    def get_or_create_semantic(self, semantic: Semantic, threshold: float = 0.85) -> tuple[str, bool]:
+        """
+        Get existing semantic if similar one exists, otherwise create new.
+
+        Returns: (semantic_id, is_new)
+        """
+        # Check for similar existing semantic by embedding
+        if semantic.embedding:
+            similar = self.find_similar_semantics(semantic.embedding, top_k=1)
+            if similar and similar[0]['score'] >= threshold:
+                return similar[0]['id'], False
+
+        # Create new semantic
+        self.create_semantic(semantic)
+        return semantic.id, True
+
+    def get_semantics_for_issue(self, issue_id: str) -> list[dict]:
+        """Get semantic categories linked to an issue."""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (i:Issue {id: $issue_id})-[:ABSTRACTS_TO]->(s:Semantic)
+                RETURN s.id as id, s.name as name, s.description as description
+            """, issue_id=issue_id)
+            return [dict(r) for r in result]
+
+    def get_issues_for_semantic(self, semantic_id: str) -> list[dict]:
+        """Get all issues in a semantic category."""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (i:Issue)-[:ABSTRACTS_TO]->(s:Semantic {id: $semantic_id})
+                RETURN i.id as id, i.description as description
+            """, semantic_id=semantic_id)
+            return [dict(r) for r in result]
+
+    # --- Stage 3 Retrieval: Semantic Patterns ---
+
+    def find_semantic_patterns(self, embedding: list[float], top_k: int = 5) -> list[dict]:
+        """
+        Stage 3 Retrieval: Find semantic patterns from similar issues.
+
+        1. Find similar issues by embedding
+        2. Traverse to their connected Semantic nodes
+        3. Return aggregated semantic patterns with frequency
+        """
+        with self.driver.session() as session:
+            result = session.run("""
+                CALL db.index.vector.queryNodes('issue_embedding', $limit, $embedding)
+                YIELD node as issue, score
+                WHERE score >= 0.85
+                MATCH (issue)-[:ABSTRACTS_TO]->(s:Semantic)
+                WITH s, count(issue) as frequency, avg(score) as avg_similarity
+                RETURN s.id as id, s.name as name, s.description as description,
+                       frequency, avg_similarity
+                ORDER BY frequency DESC, avg_similarity DESC
+                LIMIT $top_k
+            """, limit=top_k * 3, embedding=embedding, top_k=top_k)
+            return [dict(r) for r in result]
+
+    def get_semantics_for_attempts(self, attempt_ids: list[str]) -> list[dict]:
+        """
+        Get semantic patterns from a list of attempts.
+
+        Traverses: Attempt → CAUSES → Issue → ABSTRACTS_TO → Semantic
+        """
+        if not attempt_ids:
+            return []
+
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (a:Attempt)-[:CAUSES]->(i:Issue)-[:ABSTRACTS_TO]->(s:Semantic)
+                WHERE a.id IN $attempt_ids
+                WITH s, count(DISTINCT i) as issue_count, collect(DISTINCT i.description)[0..3] as sample_issues
+                RETURN s.id as id, s.name as name, s.description as description,
+                       issue_count, sample_issues
+                ORDER BY issue_count DESC
+            """, attempt_ids=attempt_ids)
+            return [dict(r) for r in result]

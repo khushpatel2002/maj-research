@@ -25,6 +25,13 @@ def store_result(gm, result):
         gm.create_issue(issue)
     for fix in result['fixes']:
         gm.create_fix(fix)
+
+    # Store semantics if present (only new ones)
+    semantic_rels = result.get('semantic_relationships', [])
+    for i, semantic in enumerate(result.get('semantics', [])):
+        if i < len(semantic_rels) and semantic_rels[i].get('is_new', True):
+            gm.get_or_create_semantic(semantic)
+
     for rel in result['relationships']:
         if rel['type'] == 'SATISFIES':
             gm.link_attempt_satisfies_policy(rel['from_id'], policy_id)
@@ -32,6 +39,11 @@ def store_result(gm, result):
             gm.link_attempt_causes_issue(rel['from_id'], rel['to_id'])
         elif rel['type'] == 'RESOLVES':
             gm.link_fix_resolves_issue(rel['from_id'], rel['to_id'])
+
+    # Store semantic relationships if present
+    for rel in result.get('semantic_relationships', []):
+        if rel['type'] == 'ABSTRACTS_TO':
+            gm.link_issue_abstracts_to_semantic(rel['from_id'], rel['to_id'])
 
 
 def print_judgment(result, label):
